@@ -1,92 +1,135 @@
-name: CMake
+name: Build
 
 on:
   push:
     tags:
       - '*'
-    branches: [ master ]
+    branches: [ master, main ]
   pull_request:
-    branches: [ master ]
+    branches: [ master, main ]
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+  actions: read
+
 env:
-  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Release
 
 jobs:
   build:
-    # The CMake configure and build commands are platform agnostic and should work equally well on Windows or Mac.
-    # You can convert this to a matrix build if you need cross-platform coverage.
-    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
-    name: ${{matrix.config.name}}
-    runs-on: ${{matrix.config.os}}
+    name: ${{ matrix.config.name }}
+    runs-on: ${{ matrix.config.os }}
     strategy:
       matrix:
         config:
           - { name: "Ubuntu gcc", os: "ubuntu-22.04", generator: "Unix Makefiles", cc: "gcc", cxx: "g++" }
           - { name: "Ubuntu clang", os: "ubuntu-22.04", generator: "Unix Makefiles", cc: "clang", cxx: "clang++" }
-          - { name: "macOS clang", os: "macos-latest", generator: "Unix Makefiles", cc: "clang", cxx: "clang++", cmake_flags: "-DCMAKE_OSX_ARCHITECTURES='x86_64;arm64' -DCMAKE_OSX_DEPLOYMENT_TARGET=14.5" }
+          - { name: "macOS clang", os: "macos-latest", generator: "Unix Makefiles", cc: "clang", cxx: "clang++", cmake_flags: "-DCMAKE_OSX_ARCHITECTURES='x86_64;arm64' -DCMAKE_OSX_DEPLOYMENT_TARGET=14" }
           - { name: "Windows clang", os: "windows-2022", generator: "Unix Makefiles", cc: "clang", cxx: "clang++" }
-          - { name: "Windows MSVC", os: "windows-2022", generator: "Visual Studio 17 2022"}
+          - { name: "Windows MSVC", os: "windows-2022", generator: "Visual Studio 17 2022" }
 
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        fetch-tags: true
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
-    - name: Configure CMake
-      # Configure CMake in a 'build' subdirectory. `CMAKE_BUILD_TYPE` is only required if you are using a single-configuration generator such as make.
-      # See https://cmake.org/cmake/help/latest/variable/CMAKE_BUILD_TYPE.html?highlight=cmake_build_type
-      run: cmake -B ${{github.workspace}}/build -G "${{matrix.config.generator}}" -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DARMIPS_USE_STD_FILESYSTEM=ON -DCMAKE_INSTALL_PREFIX=${{github.workspace}}/install ${{matrix.config.cmake_flags}}
-      env:
-        CC: ${{matrix.config.cc}}
-        CXX: ${{matrix.config.cxx}}
+      - name: Configure CMake
+        run: cmake -B "${{ github.workspace }}/build" -G "${{ matrix.config.generator }}" -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} -DARMIPS_USE_STD_FILESYSTEM=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install" ${{ matrix.config.cmake_flags }}
+        env:
+          CC: ${{ matrix.config.cc }}
+          CXX: ${{ matrix.config.cxx }}
 
-    - name: Build
-      # Build your program with the given configuration
-      run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} 
+      - name: Build
+        run: cmake --build "${{ github.workspace }}/build" --config ${{ env.BUILD_TYPE }}
 
-    - name: Test
-      working-directory: ${{github.workspace}}/build
-      # Execute tests defined by the CMake configuration.  
-      # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
-      run: ctest -C ${{env.BUILD_TYPE}} --output-on-failure
+      - name: Test
+        working-directory: ${{ github.workspace }}/build
+        run: ctest -C ${{ env.BUILD_TYPE }} --output-on-failure
 
-    - name: Install
-      shell: bash
-      run: |
-        cmake --build "${{ github.workspace }}/build" --config ${{ env.BUILD_TYPE }} --target install
-        if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-          VERSION="${GITHUB_REF#refs/tags/}"
-        else
-          VERSION=$(git -C "${{ github.workspace }}" describe --tags --always --dirty 2>/dev/null || git -C "${{ github.workspace }}" rev-parse --short HEAD)
-        fi
-    
-        PLATFORM=$(echo "${{ matrix.config.name }}" | tr '[:upper:]' '[:lower:]' | sed 's/ /_/g')
-    
-        echo "FILENAME=armips_${VERSION}_${PLATFORM}" >> $GITHUB_ENV
-        echo "RELEASENAME=armips_${VERSION}" >> $GITHUB_ENV
+      - name: Install
+        shell: bash
+        run: |
+          cmake --build "${{ github.workspace }}/build" --config ${{ env.BUILD_TYPE }} --target install
+          PLATFORM=$(echo "${{ matrix.config.name }}" | tr '[:upper:]' '[:lower:]' | sed 's/ /_/g')
+          echo "PLATFORM=${PLATFORM}" >> $GITHUB_ENV
 
-    - name: Upload
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{env.FILENAME}}
-        path: ${{github.workspace}}/install
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.config.name }}
+          path: ${{ github.workspace }}/install
 
-    - name: Archive Release
-      uses: thedoctor0/zip-release@0.7.6
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        type: 'zip'
-        filename: ${{env.FILENAME}}.zip
-        directory: '${{github.workspace}}/install'
+  publish:
+    name: Publish (version / tag / release)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (fetch tags & history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
-    - name: Release
-      uses: softprops/action-gh-release@v2
-      if: startsWith(github.ref, 'refs/tags/')
-      with:
-        name: ${{env.RELEASENAME}}
-        prerelease: true
-        files: ${{github.workspace}}/install/${{env.FILENAME}}.zip
-    
+      - name: Determine version and whether to push tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # read current version from VERSION file if exists, else latest tag, else 0.0.0
+          if [ -f VERSION ]; then
+            CURRENT=$(cat VERSION)
+          else
+            CURRENT=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          fi
+          CURRENT="${CURRENT#v}"
+          echo "Current version: $CURRENT"
+
+          # Defaults
+          SHOULD_PUSH=false
+          VERSION="$CURRENT"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual run: keep VERSION as-is (do not bump or push)
+            echo "Manual dispatch: keeping version $VERSION"
+            SHOULD_PUSH=false
+          else
+            # For push events: auto-bump only when not on a tag ref and not run by the bot
+            if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+              echo "Run on tag ref (${GITHUB_REF}); not bumping."
+              SHOULD_PUSH=false
+            elif [[ "${GITHUB_ACTOR}" == "github-actions[bot]" ]]; then
+              echo "Run triggered by github-actions[bot]; not bumping."
+              SHOULD_PUSH=false
+            else
+              # bump patch
+              IFS='.' read -r MAJ MIN PATCH <<< "${CURRENT}"
+              MAJ=${MAJ:-0}; MIN=${MIN:-0}; PATCH=${PATCH:-0}
+              PATCH=$((PATCH+1))
+              VERSION="$MAJ.$MIN.$PATCH"
+              SHOULD_PUSH=true
+              echo "Auto-bumped version -> $VERSION"
+            fi
+          fi
+
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "SHOULD_PUSH=$SHOULD_PUSH" >> $GITHUB_OUTPUT
+
+          # persist VERSION file so it can be committed if needed
+          echo "$VERSION" > VERSION
+
+      - name: Commit VERSION and push tag (if auto-bumped)
+        if: steps.version.outputs.SHOULD_PUSH == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+          GIT_COMMITTER_NAME: "github-actions[bot]"
+          GIT_COMMITTER_EMAIL: "github-actions[bot]@users.noreply.github.com"
+        run: |
+          set -euo pipefail
+          git config user.name "$GIT_COMMITTER_NAME"
+          git config user.email "$GIT_COMMITTER_EMAIL"
+
+          git add VERSION
+          git commit
