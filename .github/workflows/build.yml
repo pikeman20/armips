@@ -56,9 +56,15 @@ jobs:
     - name: Install
       shell: bash
       run: |
-        cmake --build '${{github.workspace}}/build' --config ${{env.BUILD_TYPE}} --target install
-        VERSION=$(git -C '${{github.workspace}}' describe --first-parent)
-        PLATFORM=$(echo ${{matrix.config.name}} | tr '[:upper:]' '[:lower:'] | sed 's/ /_/g')
+        cmake --build "${{ github.workspace }}/build" --config ${{ env.BUILD_TYPE }} --target install
+        if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+          VERSION="${GITHUB_REF#refs/tags/}"
+        else
+          VERSION=$(git -C "${{ github.workspace }}" describe --tags --always --dirty 2>/dev/null || git -C "${{ github.workspace }}" rev-parse --short HEAD)
+        fi
+    
+        PLATFORM=$(echo "${{ matrix.config.name }}" | tr '[:upper:]' '[:lower:]' | sed 's/ /_/g')
+    
         echo "FILENAME=armips_${VERSION}_${PLATFORM}" >> $GITHUB_ENV
         echo "RELEASENAME=armips_${VERSION}" >> $GITHUB_ENV
 
